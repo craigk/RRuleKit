@@ -47,9 +47,21 @@ struct RecurrenceRuleRFC5545ParseTests {
     }
 
     @Test("Throws an error for invalid FREQ Rule Part")
-    func throwsErrorForInvalidFrequencyRuleParrt() throws {
+    func throwsErrorForInvalidFrequencyRulePart() throws {
       #expect(throws: NSError.self) {
         try parser.parse("FREQ=FOOBAR")
+      }
+    }
+
+    /// Ensures the public parse error contract: CocoaError with formatting code and NSCocoaErrorDomain.
+    @Test("Parse failure throws CocoaError with formatting code and NSCocoaErrorDomain")
+    func parseFailureThrowsStableErrorContract() throws {
+      do {
+        _ = try parser.parse("FREQ=FOOBAR")
+        #expect(Bool(false), "Expected parse to throw")
+      } catch let error as NSError {
+        #expect(error.domain == NSCocoaErrorDomain)
+        #expect(error.code == CocoaError.Code.formatting.rawValue)
       }
     }
 
@@ -64,7 +76,7 @@ struct RecurrenceRuleRFC5545ParseTests {
     @Test("Throws an error for invalid INTERVAL Rule Part", arguments: [
       "INTERVAL=", "INTERVAL=-1", "INTERVAL=0", "INTERVAL=foo"
     ])
-    func throwsErrorForInvalidIntervalRuleParrt(invalidInterval: String) throws {
+    func throwsErrorForInvalidIntervalRulePart(invalidInterval: String) throws {
       let rfcString = "FREQ=DAILY;\(invalidInterval)"
       #expect(throws: NSError.self) {
         try parser.parse(rfcString)
@@ -114,7 +126,7 @@ struct RecurrenceRuleRFC5545ParseTests {
     }
 
     @Test("Parse UNTIL local DATE-TIME Rule Part")
-    func parseUntilLocalDateTimeRuleParty() throws {
+    func parseUntilLocalDateTimeRulePart() throws {
       let rfcString = "FREQ=DAILY;UNTIL=20250111T235959"
       let expected = Calendar.RecurrenceRule.End.afterDate(Date(timeIntervalSince1970: 1736639999))
       let result = try parser.parse(rfcString)
@@ -131,8 +143,17 @@ struct RecurrenceRuleRFC5545ParseTests {
       #expect(result.end == expected)
     }
 
+    @Test("Parse UNTIL DATE-TIME with hour 00 (midnight) per RFC 5545")
+    func parseUntilDateTimeWithHourZeroRulePart() throws {
+      let rfcString = "FREQ=DAILY;UNTIL=20250111T003000Z"
+      let result = try parser.parse(rfcString)
+      // 2025-01-11 00:30:00 UTC = midnight + 30 minutes
+      let expected = Calendar.RecurrenceRule.End.afterDate(Date(timeIntervalSince1970: 1736555400))
+      #expect(result.end == expected)
+    }
+
     @Test("Throws an error for invalid UNTIL Rule Part", arguments: ["UNTIL=20251350", "UNTIL=foobar", "UNTIL=1"])
-    func throwsErrorForInvalidCountRulePart(invalidString: String) throws {
+    func throwsErrorForInvalidUntilRulePart(invalidString: String) throws {
       let rfcString = "FREQ=DAILY;\(invalidString)"
 
       #expect(throws: NSError.self, performing: {
@@ -175,7 +196,7 @@ struct RecurrenceRuleRFC5545ParseTests {
     }
 
     @Test("Throws an error for invalid BYMINUTE Rule Part", arguments: ["BYMINUTE=-1","BYMINUTE=60","BYMINUTE=foobar"])
-    func invalidByMinute(rfcByMinute: String) throws {
+    func throwsErrorForInvalidByMinuteRulePart(rfcByMinute: String) throws {
       let rfcString = "FREQ=DAILY;\(rfcByMinute)"
 
       #expect(throws: NSError.self) {
@@ -191,9 +212,9 @@ struct RecurrenceRuleRFC5545ParseTests {
       #expect(result.hours == expected)
     }
 
-    @Test("Throws an error for invalid BYMINUTE Rule Part", arguments: ["BYHOUR=-1","BYHOUR=24","BYMINUTE=foobar"])
-    func invalidByHour(rfcByMinute: String) throws {
-      let rfcString = "FREQ=DAILY;\(rfcByMinute)"
+    @Test("Throws an error for invalid BYHOUR Rule Part", arguments: ["BYHOUR=-1", "BYHOUR=24", "BYHOUR=foobar"])
+    func throwsErrorForInvalidByHourRulePart(rfcByHour: String) throws {
+      let rfcString = "FREQ=DAILY;\(rfcByHour)"
 
       #expect(throws: NSError.self) {
         try parser.parse(rfcString)
@@ -213,7 +234,7 @@ struct RecurrenceRuleRFC5545ParseTests {
         ]
       )
     )
-    func parseByDayEveryWeekdarRulePart(rfcByDay: String, expected: Calendar.RecurrenceRule.Weekday) throws {
+    func parseByDayEveryWeekdayRulePart(rfcByDay: String, expected: Calendar.RecurrenceRule.Weekday) throws {
       let rfcString = "FREQ=DAILY;\(rfcByDay)"
       let result = try parser.parse(rfcString)
 
@@ -248,7 +269,7 @@ struct RecurrenceRuleRFC5545ParseTests {
       ["BYMONTHDAY=1", "BYMONTHDAY=-31", "BYMONTHDAY=1,15,31"],
       [[1], [-31], [1, 15, 31]]
     ))
-    func parseByMonthDatRulePart(rfcByMonthDay: String, expected: [Int]) throws {
+    func parseByMonthDayRulePart(rfcByMonthDay: String, expected: [Int]) throws {
       let rfcString = "FREQ=MONTHLY;\(rfcByMonthDay)"
       let result = try parser.parse(rfcString)
 
@@ -280,7 +301,7 @@ struct RecurrenceRuleRFC5545ParseTests {
     @Test("Throws an error for invalid BYYEARDAY Rule Part", arguments: [
       "BYYEARDAY=", "BYYEARDAY=-367", "BYYEARDAY=367", "BYYEARDAY=foobar"
     ])
-    func throwsErroForInvalidByYearDayRulePart(invalidString: String) throws {
+    func throwsErrorForInvalidByYearDayRulePart(invalidString: String) throws {
       let rfcString = "FREQ=YEARLY;\(invalidString)"
 
       #expect(throws: NSError.self) {
@@ -312,7 +333,7 @@ struct RecurrenceRuleRFC5545ParseTests {
 
     @Test("Parses BYMONTH Rule Part", arguments: zip(
       ["BYMONTH=1", "BYMONTH=1,6,12"],
-      [[Calendar.RecurrenceRule.Month(1)], [1, 6, 12]]
+      [[Calendar.RecurrenceRule.Month(1)], [Calendar.RecurrenceRule.Month(1), .init(6), .init(12)]]
     ))
     func parseByMonthRulePart(rfcByMonth: String, expected: [Calendar.RecurrenceRule.Month]) throws {
       let rfcString = "FREQ=YEARLY;\(rfcByMonth)"
@@ -354,6 +375,29 @@ struct RecurrenceRuleRFC5545ParseTests {
     }
   }
 
+  /// RFC 5545: compliant applications MUST accept rule parts in any order.
+  @Test("Parses rule when FREQ is not the first key (any order)")
+  func parsesWhenFreqIsNotFirst() throws {
+    let result = try parser.parse("COUNT=5;FREQ=DAILY")
+    #expect(result.frequency == .daily)
+    #expect(result.end == .afterOccurrences(5))
+  }
+
+  /// Exact key "FREQ" is required; "FREQUENCY" is not accepted.
+  @Test("Throws an error when first key is FREQUENCY instead of FREQ")
+  func throwsErrorWhenKeyIsFrequencyNotFreq() throws {
+    #expect(throws: NSError.self) {
+      try parser.parse("FREQUENCY=DAILY")
+    }
+  }
+
+  @Test("Throws an error for FREQ=SECONDLY (unsupported)")
+  func throwsErrorForSecondlyFrequency() throws {
+    #expect(throws: NSError.self) {
+      try parser.parse("FREQ=SECONDLY;INTERVAL=1")
+    }
+  }
+
   @Test("Throws an error for invalid RFC 5545 string format", arguments: [
     "", "FOO=BAR", "COUNT=1", "FREQ=MONTHLY:COUNT=2", "FREQ=MONTHLY;BYDAY=MO;WE"
   ])
@@ -387,5 +431,78 @@ struct RecurrenceRuleRFC5545ParseTests {
     #expect(throws: NSError.self) {
       try parser.parse(rfcString)
     }
+  }
+
+  /// RFC 5545 errata: BYDAY with numeric modifiers + BYWEEKNO in YEARLY can be invalid.
+  /// The library does not reject this combination; parsing succeeds and semantics are left to Foundation.
+  @Test("Parses YEARLY with BYWEEKNO and BYDAY ordinal (errata combination; library does not reject)")
+  func parsesYearlyByWeekNoAndByDayOrdinal() throws {
+    let rfcString = "FREQ=YEARLY;BYWEEKNO=1;BYDAY=1MO"
+    let result = try parser.parse(rfcString)
+    #expect(result.frequency == .yearly)
+    #expect(result.weeks == [1])
+    #expect(result.weekdays == [.nth(1, .monday)])
+  }
+
+  // MARK: - RFC 5545 case-insensitivity (Section 2, 3.1)
+
+  @Test("Parse FREQ with lowercase value (case-insensitive)")
+  func parseFreqLowerCase() throws {
+    let result = try parser.parse("freq=daily")
+    #expect(result.frequency == .daily)
+  }
+
+  @Test("Parse mixed-case key and value")
+  func parseMixedCase() throws {
+    let result = try parser.parse("FREQ=Weekly;ByDay=mo,we,fr")
+    #expect(result.frequency == .weekly)
+    #expect(result.weekdays == [.every(.monday), .every(.wednesday), .every(.friday)])
+  }
+
+  // MARK: - WKST (RFC 5545 Section 3.3.10)
+
+  @Test("Parses rule with WKST (accepted and ignored; Foundation has no week-start API)")
+  func parsesWithWkst() throws {
+    let result = try parser.parse("FREQ=WEEKLY;WKST=SU;BYDAY=MO")
+    #expect(result.frequency == .weekly)
+    #expect(result.weekdays == [.every(.monday)])
+  }
+
+  // MARK: - Content-line unfolding (RFC 5545 Section 3.1)
+
+  @Test("Parses folded content line (CRLF + SPACE removed)")
+  func parsesFoldedContentLine() throws {
+    let folded = "FREQ=DAILY;BYDAY=MO,\r\n TU,WE"
+    let result = try parser.parse(folded)
+    #expect(result.frequency == .daily)
+    #expect(result.weekdays == [.every(.monday), .every(.tuesday), .every(.wednesday)])
+  }
+
+  @Test("Parses folded content line (LF + SPACE)")
+  func parsesFoldedContentLineLF() throws {
+    let folded = "FREQ=WEEKLY;COUNT=3\n ;BYDAY=MO"
+    let result = try parser.parse(folded)
+    #expect(result.frequency == .weekly)
+    #expect(result.end == .afterOccurrences(3))
+    #expect(result.weekdays == [.every(.monday)])
+  }
+
+  // MARK: - BYSECOND=60 (leap second, RFC 5545)
+
+  @Test("Parses BYSECOND=60 (leap second per RFC 5545)")
+  func parsesBySecond60() throws {
+    let result = try parser.parse("FREQ=DAILY;BYSECOND=0,60")
+    #expect(result.seconds == [0, 60])
+  }
+
+  // MARK: - ParseableFormatStyle API (RecurrenceRule+FormatStyle)
+
+  @Test("Parse via RecurrenceRule init with strategy (ParseStrategy API)")
+  func parseViaRecurrenceRuleInitWithStrategy() throws {
+    let rfcString = "FREQ=WEEKLY;BYDAY=MO,FR;COUNT=5"
+    let rule = try Calendar.RecurrenceRule(rfcString, strategy: parser)
+    #expect(rule.frequency == .weekly)
+    #expect(rule.weekdays == [.every(.monday), .every(.friday)])
+    #expect(rule.end == .afterOccurrences(5))
   }
 }
