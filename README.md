@@ -47,6 +47,13 @@ This library provides comprehensive support for parsing and formatting recurrenc
     - Validating ranges for numerical values (e.g., seconds, minutes, days).
   - Converts between `Calendar.RecurrenceRule` objects and RFC 5545-compliant strings.
 
+**Key RFC 5545 parsing rules** (see [RFC 5545 Section 3.3.10](https://datatracker.ietf.org/doc/html/rfc5545#section-3.3.10)):
+  - **FREQ** is required exactly once; rule parts may appear in **any order** (e.g. `COUNT=5;FREQ=DAILY` is valid). The key must be exactly `FREQ` (case-insensitive).
+  - **Case-insensitivity**: Property names and enumerated values are case-insensitive (e.g. `freq=daily`, `BYDAY=mo,we`).
+  - **Content-line folding**: Input is unfolded before parsing (CRLF/LF + space removed). When formatting, use `foldLongLines: true` to fold lines at 75 octets.
+  - **WKST**: The `WKST` part is accepted when parsing (and ignored); use `emitWKST: true` when formatting to emit `WKST=MO`.
+  - **SECONDLY** is not supported (Foundation has no corresponding frequency).
+
 ---
 
 ## Platform Support
@@ -114,6 +121,16 @@ print(result) // Outputs: "FREQ=DAILY;INTERVAL=2;COUNT=5;BYDAY=MO,WE"
 
 ---
 
+## Add-ons
+
+Optional modules that extend RRuleKit for specific integrations:
+
+| Product | Description |
+|--------|-------------|
+| **RRuleKitRruleJSInterop** | Interop with [jkbrzt/rrule](https://github.com/jkbrzt/rrule) (JavaScript): parse full `DTSTART` + `RRULE:` content from `rule.toString()`, reject `FREQ=SECONDLY` with a clear error, and format rules with an optional DTSTART line for rrule.js. See `Sources/RRuleKitRruleJSInterop/README.md` and add `RRuleKitRruleJSInterop` to your target dependencies. |
+
+---
+
 ## Calendar.RecurrenceRule.End Support
 
 The library includes support for the `.afterOccurrences` and `.afterDate` formats within `Calendar.RecurrenceRule.End`. However, these formats are available only on the following platform versions:
@@ -129,7 +146,7 @@ The library includes support for the `.afterOccurrences` and `.afterDate` format
 
 ## Key RFC 5545 Parsing Rules
 
- - **FREQ** is mandatory and must be the first key in the rule string.
+ - **FREQ** is required exactly once; rule parts may appear in any order.
  - Currently, FREQ=SECONDLY is not supported.
  - Only one of COUNT or UNTIL can be specified.
  - Keys and values are separated by = and must be delimited by ;.
@@ -155,9 +172,20 @@ For example:
 - `BYMONTHDAY` values must be in the range -31–31.
 - `UNTIL` and `COUNT` cannot coexist in the same rule.
 
+### Enforced Rules
+
+The library explicitly enforces the following RFC 5545 rules:
+
+- **FREQ required:** Exactly one `FREQ` part is required; rule parts may appear in any order (e.g. `COUNT=5;FREQ=DAILY` is valid).
+- **No SECONDLY:** `FREQ=SECONDLY` is not supported (Foundation’s `RecurrenceRule.Frequency` does not include it). Parsing throws an error.
+- **COUNT and UNTIL mutually exclusive:** Only one of `COUNT` or `UNTIL` may appear in a rule; duplicate or conflicting keys cause parse failure.
+- **Duplicate keys:** Duplicate keys (e.g. `FREQ=DAILY;FREQ=WEEKLY`) cause parsing to fail.
+
 ### Limitations
 
 `FREQ=SECONDLY` is not supported because `Calendar.RecurrenceRule.Frequency` does not currently include this frequency. If the input string specifies `FREQ=SECONDLY`, the library will throw an error.
+
+RFC 5545 errata (e.g. restrictions on `BYDAY` with numeric modifiers when `BYWEEKNO` is present in YEARLY rules) are not validated; invalid combinations are left to Foundation’s `RecurrenceRule` semantics.
 
 ---
 
@@ -166,7 +194,9 @@ For example:
 `RRuleKit` includes an extensive test suite that validates the following:
 
 - Correct parsing and formatting of all supported rule parts.
-- Compliance with the RFC 5545 standard.
+- Compliance with the RFC 5545 standard (FREQ required, any part order, no SECONDLY, duplicate keys rejected).
+- Round-trip consistency: parse → format → parse and format → parse → format for representative rules (including UNTIL with date/date-time and multiple BY* parts).
+- Large-rule formatting with semantic checks on output.
 - Buffer capacity adjustments to handle large RRULE strings efficiently.
 
 ---

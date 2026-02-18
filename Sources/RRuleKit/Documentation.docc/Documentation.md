@@ -37,6 +37,12 @@ Each feature is optimized for performance and adheres to the rules and constrain
   - Supports both UTC and local time zone representations.
   - Includes `TZID` for local times.
 
+- **Enforced RFC 5545 rules**:
+  - FREQ is required (exactly once, any position); keys and values are case-insensitive.
+  - Input is unfolded (CRLF/LF + space removed) before parsing; optional line folding when formatting.
+  - WKST is accepted when parsing and optionally emitted when formatting; SECONDLY is not supported.
+  - COUNT and UNTIL are mutually exclusive; duplicate keys cause parse failure.
+
 ## Topics
 
 ### Essentials
