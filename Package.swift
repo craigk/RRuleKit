@@ -12,6 +12,11 @@ let package = Package(
       name: "RRuleKit",
       targets: ["RRuleKit"]
     ),
+    /// Add-on for interoperability with [jkbrzt/rrule](https://github.com/jkbrzt/rrule) (JavaScript).
+    .library(
+      name: "RRuleKitRruleJSInterop",
+      targets: ["RRuleKitRruleJSInterop"]
+    ),
   ],
   targets: [
     // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -19,9 +24,18 @@ let package = Package(
     .target(
       name: "RRuleKit"
     ),
+    .target(
+      name: "RRuleKitRruleJSInterop",
+      dependencies: ["RRuleKit"],
+      exclude: ["README.md"]
+    ),
     .testTarget(
       name: "RRuleKitTests",
       dependencies: ["RRuleKit"]
+    ),
+    .testTarget(
+      name: "RRuleKitRruleJSInteropTests",
+      dependencies: ["RRuleKitRruleJSInterop", "RRuleKit"]
     ),
   ]
 )
