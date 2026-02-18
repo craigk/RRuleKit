@@ -15,11 +15,23 @@ public struct RecurrenceRuleRFC5545FormatStyle: Sendable {
   /// The calendar used for parsing and validating recurrence rules.
   public let calendar: Calendar
 
-  /// Initializes the format style with a specific calendar.
+  /// When true, formatted output longer than 75 octets is folded (CRLF + SPACE) per RFC 5545 Section 3.1.
+  /// Default is `false` for backward compatibility.
+  public let foldLongLines: Bool
+
+  /// When true, format emits `WKST=MO` when appropriate (RFC 5545 default week start). Default is `false`.
+  public let emitWKST: Bool
+
+  /// Initializes the format style with a specific calendar and optional RFC 5545 content-line options.
   ///
-  /// - Parameter calendar: The calendar to use for parsing. Defaults to `.current`.
-  public init(calendar: Calendar = .current) {
+  /// - Parameters:
+  ///   - calendar: The calendar to use for parsing. Defaults to `.current`.
+  ///   - foldLongLines: If true, format folds lines longer than 75 octets. Defaults to `false`.
+  ///   - emitWKST: If true, format emits WKST=MO for RECUR compliance. Defaults to `false`.
+  public init(calendar: Calendar = .current, foldLongLines: Bool = false, emitWKST: Bool = false) {
     self.calendar = calendar
+    self.foldLongLines = foldLongLines
+    self.emitWKST = emitWKST
   }
 }
 
@@ -36,8 +48,8 @@ extension RecurrenceRuleRFC5545FormatStyle: FormatStyle {
     var buffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: estimatedCapacity)
     defer { buffer.deallocate() } // Ensure the buffer is deallocated after use
 
-    let lenght = format(value, into: &buffer)
-    return String(decoding: buffer[..<lenght], as: UTF8.self)
+    let length = format(value, into: &buffer)
+    return String(decoding: buffer[..<length], as: UTF8.self)
   }
 
   /// Formats a `RecurrenceRule` into a pre-allocated buffer in RFC 5545 format.
@@ -59,13 +71,19 @@ extension RecurrenceRuleRFC5545FormatStyle: FormatStyle {
     // Tracks the current write position in the buffer
     var index = 0
 
+    // MARK: Format Buffer & Helpers
+
+    /// Ensures the buffer has at least `required` capacity. When resizing, copies existing bytes.
+    /// - Invariant: When called from format(into:), `index` is the number of bytes written so far; capacity is always > 0 initially.
     func ensureCapacity(_ required: Int) {
       guard required > buffer.count else { return }
 
       let newCapacity = max(required, buffer.count * 2)
       let newBuffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: newCapacity)
 
-      newBuffer.baseAddress?.initialize(from: buffer.baseAddress!, count: index)
+      if index > 0, let source = buffer.baseAddress {
+        newBuffer.baseAddress?.initialize(from: source, count: index)
+      }
       buffer.deallocate()
       buffer = newBuffer
     }
@@ -152,12 +170,12 @@ extension RecurrenceRuleRFC5545FormatStyle: FormatStyle {
       append(month, zeroPad: 2)
       append(day, zeroPad: 2)
 
-      // Append time components if this is a DATE-TIME
+      // Append time components if this is a DATE-TIME (default to midnight when omitted per RFC 5545)
       if isDateTime {
         append("T".utf8)
-        append(components.hour!, zeroPad: 2)
-        append(components.minute!, zeroPad: 2)
-        append(components.second!, zeroPad: 2)
+        append(components.hour ?? 0, zeroPad: 2)
+        append(components.minute ?? 0, zeroPad: 2)
+        append(components.second ?? 0, zeroPad: 2)
 
         // Add UTC suffix if the time is in UTC
         if isUTC {
@@ -294,8 +312,94 @@ extension RecurrenceRuleRFC5545FormatStyle: FormatStyle {
       append(rrule.setPositions)
     }
 
-    // Return the total number of bytes written
-    return index
+    // Emit WKST=MO per RFC 5545 default when requested (significant for WEEKLY with interval>1 or YEARLY with BYWEEKNO).
+    if emitWKST {
+      append(";WKST=MO".utf8)
+    }
+
+    let length = index
+    if foldLongLines {
+      return foldContentLine(buffer: &buffer, length: length)
+    }
+    return length
+  }
+}
+
+// MARK: - Content-Line Folding (RFC 5545 Section 3.1)
+
+extension RecurrenceRuleRFC5545FormatStyle {
+
+  /// Unfolds a content line: removes CRLF followed by a single linear-white-space (SPACE or HTAB).
+  /// - Parameter value: The possibly folded content line (e.g. RRULE value).
+  /// - Returns: The unfolded string.
+  package static func unfoldContentLine(_ value: String) -> String {
+    var result: [Character] = []
+    var i = value.startIndex
+    while i < value.endIndex {
+      let c = value[i]
+      // Swift treats "\r\n" as a single Character (extended grapheme cluster); handle both single-char and \r then \n.
+      if c == "\r\n" {
+        let afterCRLF = value.index(after: i)
+        if afterCRLF < value.endIndex {
+          let next = value[afterCRLF]
+          if next == " " || next == "\t" {
+            i = value.index(after: afterCRLF)
+            continue
+          }
+        }
+        i = value.index(after: i)
+        continue
+      }
+      if c == "\r", value.index(i, offsetBy: 1, limitedBy: value.endIndex) ?? value.endIndex < value.endIndex {
+        let next = value.index(i, offsetBy: 1)
+        if next < value.endIndex, value[next] == "\n" {
+          let afterCRLF = value.index(next, offsetBy: 1)
+          if afterCRLF < value.endIndex {
+            let n = value[afterCRLF]
+            if n == " " || n == "\t" {
+              i = value.index(after: afterCRLF)
+              continue
+            }
+          }
+        }
+      } else if c == "\n" {
+        let afterLF = value.index(i, offsetBy: 1)
+        if afterLF < value.endIndex {
+          let n = value[afterLF]
+          if n == " " || n == "\t" {
+            i = value.index(after: afterLF)
+            continue
+          }
+        }
+      }
+      result.append(c)
+      i = value.index(after: i)
+    }
+    return String(result)
+  }
+
+  /// Folds buffer content so no line exceeds 75 octets per RFC 5545; returns new length.
+  /// Inserts CRLF + SPACE at octet boundaries. Reallocates buffer and replaces with folded content.
+  private func foldContentLine(buffer: inout UnsafeMutableBufferPointer<UInt8>, length: Int) -> Int {
+    let maxOctets = 75
+    let estimatedOut = length + (length / maxOctets + 1) * 3
+    let newBuffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: estimatedOut)
+    var writeIndex = 0
+    var lineStart = 0
+    for i in 0..<length {
+      if i - lineStart >= maxOctets, lineStart < i {
+        newBuffer[writeIndex] = 13
+        newBuffer[writeIndex + 1] = 10
+        newBuffer[writeIndex + 2] = 32
+        writeIndex += 3
+        lineStart = i
+      }
+      newBuffer[writeIndex] = buffer[i]
+      writeIndex += 1
+    }
+    buffer.deallocate()
+    buffer = newBuffer
+    return writeIndex
   }
 }
 
@@ -309,26 +413,16 @@ extension RecurrenceRuleRFC5545FormatStyle: ParseStrategy {
   /// - Returns: A `RecurrenceRule` if parsing is successful.
   ///
   /// ## RFC 5545 Parsing Requirements:
-  ///   The `FREQ` key is **mandatory** and defines the recurrence frequency.
-  ///   **`FREQ` must appear as the first key** in the string.
-  ///
-  ///   Optional keys include:
-  ///   - `COUNT`: Specifies the number of occurrences.
-  ///   - `UNTIL`: Defines the end date of the recurrence in either UTC or local time.
-  ///   - `INTERVAL`: Specifies the interval between occurrences (default is 1).
-  ///   - `BY*` keys (e.g., `BYSECOND`, `BYDAY`): Define specific occurrences within the recurrence pattern.
-  ///   - Keys must be separated by semicolons (`;`) and formatted as `KEY=VALUE`.
-  ///   - Only one of `COUNT` or `UNTIL` can be present in a single rule.
-  ///
-  /// - Note: The input string must follow strict RFC 5545 formatting.
-  ///   Invalid or unsupported keys will cause parsing to fail.
+  ///   The `FREQ` key is **mandatory** and must appear exactly once; rule parts may be in **any order**.
+  ///   Property names and enumerated values are **case-insensitive**. Input is unfolded (CRLF+space removed) before parsing.
+  ///   Optional keys: `COUNT`, `UNTIL`, `INTERVAL`, `BY*`, `WKST`. Only one of `COUNT` or `UNTIL` is allowed.
   ///
   /// - Warning: **The `FREQ=SECONDLY` frequency is currently not supported.**
-  ///   If the input string specifies `FREQ=SECONDLY`, the function throw error.
   ///
   /// See also: [RFC 5545](https://datatracker.ietf.org/doc/html/rfc5545#section-3.3.10)
   public func parse(_ rfcString: String) throws -> RecurrenceRule {
-    guard let (_, rrule) = parse(rfcString, in: rfcString.startIndex..<rfcString.endIndex) else {
+    let unfolded = Self.unfoldContentLine(rfcString)
+    guard let (_, rrule) = parse(unfolded, in: unfolded.startIndex..<unfolded.endIndex) else {
       throw self.parseError(rfcString, exampleFormattedString: "FREQ=MINUTELY")
     }
 
@@ -342,132 +436,120 @@ extension RecurrenceRuleRFC5545FormatStyle: ParseStrategy {
   ///   - range: The range within the string to parse.
   /// - Returns: A tuple containing the final parsing position and the `RecurrenceRule` object if parsing succeeds; otherwise, `nil`.
   ///
-  /// ## Parsing Details:
-  /// The `FREQ` key is **mandatory** and must be the first key.
-  /// Other optional keys include:
-  ///   - `UNTIL`: Specifies the end date of the recurrence in either UTC or local time.
-  ///   - `COUNT`: Specifies the number of occurrences.
-  ///   - `INTERVAL`: Specifies the interval between occurrences (default is 1).
-  ///   - `BY*` keys (e.g., `BYSECOND`, `BYDAY`): Define specific occurrences within the recurrence pattern.
-  ///
-  /// Keys must be separated by semicolons (`;`) and formatted as `KEY=VALUE`.
-  /// Only one of `UNTIL` or `COUNT` can be present in the rule.
-  /// The input string must follow strict RFC 5545 formatting. Any invalid or unsupported key-value pair will cause parsing to fail.
-  ///
-  /// ## Validation:
-  /// Values are validated against their respective ranges:
-  ///   - `BYSECOND`: Values must be in the range [0, 60].
-  ///   - `BYMINUTE`: Values must be in the range [0, 59].
-  ///   - `BYHOUR`: Values must be in the range [0, 23].
-  ///   - `BYMONTH`: Values must be in the range [1, 12].
-  ///   - `BYDAY`: Days are validated against valid weekday codes.
-  ///   - `BYMONTHDAY`: Values must be in the range [-31, 31].
-  ///   - `BYYEARDAY`: Values must be in the range [-366, 366].
-  ///   - `BYWEEKNO`: Values must be in the range [-53, 53].
-  ///   - `BYSETPOS`: Values must be in the range [-366, 366].
-  ///
-  /// - Note: If multiple `BY*` keys are specified, they refine the rule by narrowing down matching occurrences.
-  ///   Currently, the frequency `FREQ=SECONDLY` is not supported.
-  ///
-  /// - Warning: Ensure that `FREQ` is the first key in the input string. Only one of `UNTIL` or `COUNT` is allowed;
-  ///   using both will cause parsing to fail.
+  /// ## Parsing Details (RFC 5545 Section 3.3.10):
+  /// The `FREQ` key is **mandatory** and must appear exactly once (in any position). Rule parts may appear in any order.
+  /// Other optional keys: `UNTIL`, `COUNT`, `INTERVAL`, `BY*`, `WKST`. Keys and enumerated values are case-insensitive.
+  /// Keys must be separated by semicolons (`;`). Only one of `UNTIL` or `COUNT` is allowed. Duplicate keys cause failure.
   ///
   /// - See also: [RFC 5545 Section 3.3.10](https://datatracker.ietf.org/doc/html/rfc5545#section-3.3.10)
   package func parse(_ value: String, in range: Range<String.Index>) -> (String.Index, RecurrenceRule)? {
     var v = value[range]
     guard !v.isEmpty else { return nil }
 
-    // Parse the UTF-8 representation of the input string.
+    typealias Part = (key: Slice<UnsafeBufferPointer<UInt8>>, value: Slice<UnsafeBufferPointer<UInt8>>)
+
     let result = v.withUTF8 { buffer -> (Int, RecurrenceRule)? in
       var index = buffer.startIndex
+      var parts: [Part] = []
+      while index < buffer.endIndex {
+        guard let (keySlice, valueSlice) = extractRulePart(&index, from: buffer) else { return nil }
+        parts.append((keySlice, valueSlice))
+      }
+      guard !parts.isEmpty else { return nil }
 
-      // Parse the mandatory "FREQ" key.
-      guard let (keySlice, valueSlice) = extractRulePart(&index, from: buffer),
-            keySlice.contains("FREQ".utf8),
-            let frequency = parseAsFrequency(valueSlice) else {
+      // Require exactly one FREQ (exact key match, case-insensitive). Reject e.g. FREQUENCY.
+      let freqParts = parts.filter { keySliceEquals($0.key, "FREQ") }
+      guard freqParts.count == 1,
+            let frequency = parseAsFrequency(freqParts[0].value) else {
         return nil
       }
 
-      // Initialize the recurrence rule with the parsed frequency.
       var rrule = RecurrenceRule(calendar: calendar, frequency: frequency)
+      var seenKeys: Set<String> = []
 
-      // Parse remaining key-value pairs.
-      while index < buffer.endIndex {
-        guard let (keySlice, valueSlice) = extractRulePart(&index, from: buffer) else {
-          return nil
-        }
+      for (keySlice, valueSlice) in parts {
+        guard let canonical = keyCanonical(keySlice) else { return nil }
+        if seenKeys.contains(canonical) { return nil }
+        seenKeys.insert(canonical)
 
-        switch keySlice.count {
-        case 5 where keySlice.elementsEqual("UNTIL".utf8):
+        switch canonical {
+        case "freq":
+          break
+        case "until":
           guard let until = parseAsDate(valueSlice), rrule.end == .never else { return nil }
           rrule.end = .afterDate(until)
-
-        case 5 where keySlice.elementsEqual("COUNT".utf8):
+        case "count":
           guard let occurrences = parseAsInt(valueSlice, min: 1), rrule.end == .never else { return nil }
           rrule.end = .afterOccurrences(occurrences)
-
-        case 8 where keySlice.elementsEqual("INTERVAL".utf8):
+        case "interval":
           guard let interval = parseAsInt(valueSlice, min: 1) else { return nil }
           rrule.interval = interval
-
-        case 8 where keySlice.elementsEqual("BYSECOND".utf8):
+        case "bysecond":
           guard let seconds = parseAsList(valueSlice, transform: { parseAsInt($0, min: 0, max: 60) }) else { return nil }
           rrule.seconds = seconds
-
-        case 8 where keySlice.elementsEqual("BYMINUTE".utf8):
+        case "byminute":
           guard let minutes = parseAsList(valueSlice, transform: { parseAsInt($0, min: 0, max: 59) }) else { return nil }
           rrule.minutes = minutes
-
-        case 6 where keySlice.elementsEqual("BYHOUR".utf8):
+        case "byhour":
           guard let hours = parseAsList(valueSlice, transform: { parseAsInt($0, min: 0, max: 23) }) else { return nil }
           rrule.hours = hours
-
-        case 5 where keySlice.elementsEqual("BYDAY".utf8):
-          guard let weekdays = parseAsList(valueSlice, transform: { parseAsWeekday($0) })else { return nil }
+        case "byday":
+          guard let weekdays = parseAsList(valueSlice, transform: { parseAsWeekday($0) }) else { return nil }
           rrule.weekdays = weekdays
-
-        case 10 where keySlice.elementsEqual("BYMONTHDAY".utf8):
+        case "bymonthday":
           let daysOfTheMonth = parseAsList(valueSlice) { parseAsInt($0, min: -31, max: 31) }
           guard let daysOfTheMonth, daysOfTheMonth.count > 0 else { return nil }
           rrule.daysOfTheMonth = daysOfTheMonth
-
-        case 9 where keySlice.elementsEqual("BYYEARDAY".utf8):
+        case "byyearday":
           let daysOfTheYear = parseAsList(valueSlice) { parseAsInt($0, min: -366, max: 366) }
           guard let daysOfTheYear, daysOfTheYear.count > 0 else { return nil }
           rrule.daysOfTheYear = daysOfTheYear
-
-        case 8 where keySlice.elementsEqual("BYWEEKNO".utf8):
+        case "byweekno":
           let weeks = parseAsList(valueSlice) { parseAsInt($0, min: -53, max: 53) }
           guard let weeks else { return nil }
           rrule.weeks = weeks
-
-        case 7 where keySlice.elementsEqual("BYMONTH".utf8):
+        case "bymonth":
           let months: [RecurrenceRule.Month]? = parseAsList(valueSlice) { elementSlice in
-            guard let index = parseAsInt(elementSlice, min: 1, max: 12) else { return nil }
-            return RecurrenceRule.Month(index)
+            guard let idx = parseAsInt(elementSlice, min: 1, max: 12) else { return nil }
+            return RecurrenceRule.Month(idx)
           }
-
           guard let months else { return nil }
           rrule.months = months
-
-        case 8 where keySlice.elementsEqual("BYSETPOS".utf8):
+        case "bysetpos":
           let setPositions = parseAsList(valueSlice) { parseAsInt($0, min: -366, max: 366) }
           guard let setPositions else { return nil }
           rrule.setPositions = setPositions
-
+        case "wkst":
+          break
         default:
           return nil
         }
       }
 
-      return (index, rrule)
+      return (buffer.endIndex, rrule)
     }
 
-    // Compute the final index after parsing.
     guard let result else { return nil }
     let endIndex = value.utf8.index(v.startIndex, offsetBy: result.0)
     return (endIndex, result.1)
   }
+
+  /// Case-insensitive ASCII comparison: slice equals string (exact key match).
+  private func keySliceEquals(_ slice: Slice<UnsafeBufferPointer<UInt8>>, _ string: String) -> Bool {
+    guard slice.count == string.utf8.count,
+          let s = String(bytes: slice, encoding: .utf8) else { return false }
+    return s.lowercased() == string.lowercased()
+  }
+
+  /// Returns lowercase canonical key for known RECUR part names, or nil if unknown.
+  private func keyCanonical(_ slice: Slice<UnsafeBufferPointer<UInt8>>) -> String? {
+    let known = ["FREQ", "UNTIL", "COUNT", "INTERVAL", "BYSECOND", "BYMINUTE", "BYHOUR", "BYDAY", "BYMONTHDAY", "BYYEARDAY", "BYWEEKNO", "BYMONTH", "BYSETPOS", "WKST"]
+    guard let s = String(bytes: slice, encoding: .utf8) else { return nil }
+    let lower = s.lowercased()
+    return known.first { $0.lowercased() == lower }.map { $0.lowercased() }
+  }
+
+  // MARK: - Parse Helpers
 
   /// Extracts a key-value pair from the given buffer.
   /// This function reads a key-value pair from the buffer in the format `key=value`,
@@ -594,24 +676,19 @@ extension RecurrenceRuleRFC5545FormatStyle: ParseStrategy {
     return results.isEmpty ? nil : results
   }
 
-  /// Parses a buffer slice as a `RecurrenceRule.Frequency`.
-  /// This function compares the slice of raw UTF-8 data with predefined frequency values
-  /// ("MINUTELY", "HOURLY", "DAILY", "WEEKLY", "MONTHLY", "YEARLY") and returns the corresponding
-  /// `RecurrenceRule.Frequency` enum value.
-  ///
-  /// - Parameter bufferSlice: A slice of an `UnsafeBufferPointer<UInt8>` containing the raw data to parse.
-  /// - Returns: A `RecurrenceRule.Frequency` if the slice matches a known frequency, otherwise `nil`.
+  /// Parses a buffer slice as a `RecurrenceRule.Frequency` (case-insensitive per RFC 5545).
   ///
   /// - Warning: The "SECONDLY" frequency is currently not supported in `RecurrenceRule.Frequency`.
   private func parseAsFrequency(_ bufferSlice: Slice<UnsafeBufferPointer<UInt8>>) -> RecurrenceRule.Frequency? {
-    switch bufferSlice.count {
-    case 8 where bufferSlice.elementsEqual("MINUTELY".utf8): .minutely
-    case 6 where bufferSlice.elementsEqual("HOURLY".utf8): .hourly
-    case 5 where bufferSlice.elementsEqual("DAILY".utf8): .daily
-    case 6 where bufferSlice.elementsEqual("WEEKLY".utf8): .weekly
-    case 7 where bufferSlice.elementsEqual("MONTHLY".utf8): .monthly
-    case 6 where bufferSlice.elementsEqual("YEARLY".utf8): .yearly
-    default: nil
+    guard let s = String(bytes: bufferSlice, encoding: .utf8) else { return nil }
+    switch s.lowercased() {
+    case "minutely": return .minutely
+    case "hourly": return .hourly
+    case "daily": return .daily
+    case "weekly": return .weekly
+    case "monthly": return .monthly
+    case "yearly": return .yearly
+    default: return nil
     }
   }
 
@@ -634,7 +711,7 @@ extension RecurrenceRuleRFC5545FormatStyle: ParseStrategy {
     ///   - bufferSlice: The slice containing the date or date-time data.
     ///   - timeZone: The time zone to apply to the components.
     /// - Returns: A `DateComponents` object if the parsing is successful, otherwise `nil`.
-    func parseDateComponets(_ bufferSlice: Slice<UnsafeBufferPointer<UInt8>>, tz timeZone: TimeZone? = nil) -> DateComponents? {
+    func parseDateComponents(_ bufferSlice: Slice<UnsafeBufferPointer<UInt8>>, tz timeZone: TimeZone? = nil) -> DateComponents? {
       guard bufferSlice.count > 0 else { return nil }
 
       if bufferSlice.count == 8 { // DATE
@@ -651,19 +728,24 @@ extension RecurrenceRuleRFC5545FormatStyle: ParseStrategy {
         return components
       }
 
-      if bufferSlice.count == 15 { // DATE-TIME
+      if bufferSlice.count == 15 { // DATE-TIME (hour 24 = midnight end of day per RFC 5545)
         let year = parseAsInt(bufferSlice[bufferSlice.startIndex..<bufferSlice.startIndex + 4])
         let month = parseAsInt(bufferSlice[bufferSlice.startIndex + 4..<bufferSlice.startIndex + 6], min: 1, max: 12)
         let day = parseAsInt(bufferSlice[bufferSlice.startIndex + 6..<bufferSlice.startIndex + 8], min: 1, max: 31)
-        let hour = parseAsInt(bufferSlice[bufferSlice.startIndex + 9..<bufferSlice.startIndex + 11], min: 1, max: 24)
+        let hour = parseAsInt(bufferSlice[bufferSlice.startIndex + 9..<bufferSlice.startIndex + 11], min: 0, max: 24)
         let minute = parseAsInt(bufferSlice[bufferSlice.startIndex + 11..<bufferSlice.startIndex + 13], min: 0, max: 59)
         let second = parseAsInt(bufferSlice[bufferSlice.startIndex + 13..<bufferSlice.startIndex + 15], min: 0, max: 60)
 
-        guard let year, let month, let day, let hour, let minute, let second else {
+        guard let year, let month, let day, var hour, let minute, let second else {
           return nil
         }
 
-        var components = DateComponents(year: year, month: month, day: day, hour: hour, minute: minute, second: second)
+        var dayToUse = day
+        if hour == 24 {
+          hour = 0
+          dayToUse = day + 1
+        }
+        var components = DateComponents(year: year, month: month, day: dayToUse, hour: hour, minute: minute, second: second)
         components.timeZone = timeZone
 
         return components
@@ -690,7 +772,7 @@ extension RecurrenceRuleRFC5545FormatStyle: ParseStrategy {
     }
 
     // Parse common date components
-    guard let dateComponents = parseDateComponets(dateSlice, tz: timeZone) else {
+    guard let dateComponents = parseDateComponents(dateSlice, tz: timeZone) else {
       return nil
     }
 
@@ -735,30 +817,30 @@ extension RecurrenceRuleRFC5545FormatStyle: ParseStrategy {
       index = ordinalEnd // Move index past the ordinal number
     }
 
-    // Remaining part should match a weekday abbreviation (e.g., MO, TU, WE, etc.)
+    // Remaining part should match a weekday abbreviation (case-insensitive per RFC 5545)
     let weekdaySlice = bufferSlice[index..<bufferSlice.endIndex]
-    guard weekdaySlice.count == 2 else {
+    guard weekdaySlice.count == 2,
+          let abbr = String(bytes: weekdaySlice, encoding: .utf8) else {
       return nil
     }
-
-    // Map the abbreviation to a Locale.Weekday
-    let weekday: Locale.Weekday
-    switch weekdaySlice {
-    case let slice where slice.elementsEqual("MO".utf8): weekday = .monday
-    case let slice where slice.elementsEqual("TU".utf8): weekday = .tuesday
-    case let slice where slice.elementsEqual("WE".utf8): weekday = .wednesday
-    case let slice where slice.elementsEqual("TH".utf8): weekday = .thursday
-    case let slice where slice.elementsEqual("FR".utf8): weekday = .friday
-    case let slice where slice.elementsEqual("SA".utf8): weekday = .saturday
-    case let slice where slice.elementsEqual("SU".utf8): weekday = .sunday
-    default: return nil
+    let wd: Locale.Weekday?
+    switch abbr.uppercased() {
+    case "MO": wd = .monday
+    case "TU": wd = .tuesday
+    case "WE": wd = .wednesday
+    case "TH": wd = .thursday
+    case "FR": wd = .friday
+    case "SA": wd = .saturday
+    case "SU": wd = .sunday
+    default: wd = nil
     }
+    guard let wd else { return nil }
 
     guard let ordinal else {
-      return .every(weekday)
+      return .every(wd)
     }
 
-    return .nth(ordinal, weekday)
+    return .nth(ordinal, wd)
   }
 
   private func parseError(_ value: String, exampleFormattedString: String?) -> CocoaError {
@@ -790,8 +872,8 @@ public extension FormatStyle where Self == RecurrenceRuleRFC5545FormatStyle {
     .init(calendar: .current)
   }
 
-  static func rfc5545(calendar: Calendar) -> Self {
-    .init(calendar: calendar)
+  static func rfc5545(calendar: Calendar = .current, foldLongLines: Bool = false, emitWKST: Bool = false) -> Self {
+    .init(calendar: calendar, foldLongLines: foldLongLines, emitWKST: emitWKST)
   }
 }
 
